@@ -195,45 +195,54 @@ namespace Gsplat
 
         public void DispatchSort(CommandBuffer cmd, Camera camera)
         {
-            // --- Per-renderer depth computation ---
+            // --- Phase 1: Per-renderer Initialization & Depth computation ---
             cmd.BeginSample(k_samplerDepth.name);
             foreach (var gs in m_activeGsplats)
             {
-                if (gs.RemainingCount <= 0) continue;
-                gs.ComputeDepth(cmd, camera.worldToCameraMatrix * gs.transform.localToWorldMatrix);
-            }
-
-            cmd.EndSample(k_samplerDepth.name);
-
-            // --- Per-renderer radix sort ---
-            cmd.BeginSample(k_samplerSort.name);
-            foreach (var gs in m_activeGsplats)
-            {
-                if (gs.SorterResource is not Resource res) continue;
+                // Skip if sorting is not required or no splats remain.
                 if (!gs.ComputeSortRequired || gs.RemainingCount <= 0)
                     continue;
 
-                if (!res.Initialized)
+                var res = gs.SorterResource as Resource;
+                if (res != null && !res.Initialized)
                 {
+                    // InitPayload must be executed before ComputeDepth to ensure the payload buffer is valid and not overwritten.
                     m_sortPass.InitPayload(cmd, res.OrderBuffer, (uint)res.OrderBuffer.count);
                     res.Initialized = true;
                 }
 
-                m_sortPass.Dispatch(cmd, new GsplatSortPass.Args
-                {
-                    Count = gs.RemainingCount,
-                    MatrixMv = camera.worldToCameraMatrix * gs.transform.localToWorldMatrix,
-                    InputKeys = res.InputKeys,
-                    InputValues = res.OrderBuffer,
-                    Resources = res.Resources
-                });
+                gs.ComputeDepth(cmd, camera.worldToCameraMatrix * gs.transform.localToWorldMatrix);
             }
+            cmd.EndSample(k_samplerDepth.name);
 
+            // --- Phase 2: Per-renderer radix sort ---
+            cmd.BeginSample(k_samplerSort.name);
+            foreach (var gs in m_activeGsplats)
+            {
+                if (!gs.ComputeSortRequired || gs.RemainingCount <= 0)
+                    continue;
+
+                if (gs.SorterResource is Resource res)
+                {
+                    var sorterArgs = new GsplatSortPass.Args
+                    {
+                        Count = gs.RemainingCount,
+                        MatrixMv = camera.worldToCameraMatrix * gs.transform.localToWorldMatrix,
+                        InputKeys = res.InputKeys,
+                        InputValues = res.OrderBuffer,
+                        Resources = res.Resources
+                    };
+
+                    m_sortPass.Dispatch(cmd, sorterArgs);
+                }
+            }
             cmd.EndSample(k_samplerSort.name);
 
-            // --- Global K-way merge ---
+            // --- Phase 3: Global K-way merge ---
             if (GlobalRenderEnabled)
+            {
                 m_globalRenderer.DispatchMerge(cmd, m_activeGsplats);
+            }
         }
 
         // Called by GsplatPlayerLoopHook once per frame, before Unity's PostLateUpdate phase
